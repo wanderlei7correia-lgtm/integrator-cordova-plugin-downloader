@@ -1,7 +1,6 @@
 package hr.integrator.cordova.plugins.downloader;
 
 import android.content.Context;
-import android.content.pm.LauncherApps;
 import android.database.Cursor;
 import android.net.Uri;
 
@@ -17,16 +16,12 @@ import org.json.JSONObject;
 
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.Manifest;
 
-import java.util.HashMap;
-import java.util.Map;
-
-import android.os.Environment;
+import android.os.Build;
 
 public class Downloader extends CordovaPlugin {
 	
@@ -44,14 +39,15 @@ public class Downloader extends CordovaPlugin {
   private JSONArray executeArgs;
   long downloadId = 0;
 
+  private Context appContext; // ✅ NOVO
+
   @Override
   public void initialize(final CordovaInterface cordova, final CordovaWebView webView) {
       super.initialize(cordova, webView);
     
-	  downloadManager = (DownloadManager) cordova.getActivity()
-                .getApplication()
-                .getApplicationContext()
-                .getSystemService(Context.DOWNLOAD_SERVICE);
+      appContext = cordova.getActivity().getApplicationContext(); // ✅ NOVO
+
+	  downloadManager = (DownloadManager) appContext.getSystemService(Context.DOWNLOAD_SERVICE);
   }
 
   @Override
@@ -59,13 +55,12 @@ public class Downloader extends CordovaPlugin {
 
       executeArgs = args;
 
-      if (downloadReceiverCallbackContext != null) {
-          removeDownloadReceiver();
-      }
+      removeDownloadReceiver(); // ✅ garante limpeza
+
       downloadReceiverCallbackContext = callbackContext;
 
       if(action.equals("download")){
-          if(cordova.hasPermission(WRITE_EXTERNAL_STORAGE)){
+          if(cordova.hasPermission(WRITE_EXTERNAL_STORAGE) || Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU){
               download(args.getJSONObject(0), callbackContext);
           }
           else {
@@ -86,11 +81,15 @@ public class Downloader extends CordovaPlugin {
 
     IntentFilter intentFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
 
-    webView.getContext().registerReceiver(downloadReceiver, intentFilter);
+    // ✅ CONTEXTO CORRETO
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        appContext.registerReceiver(downloadReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED);
+    } else {
+        appContext.registerReceiver(downloadReceiver, intentFilter);
+    }
 
     this.downloadId = downloadManager.enqueue(request);
       
-    // Don't return any result now, since status results will be sent when events come in from broadcast receiver
     PluginResult pluginResult = new PluginResult(PluginResult.Status.NO_RESULT);
     pluginResult.setKeepCallback(true);
     callbackContext.sendPluginResult(pluginResult);
@@ -103,14 +102,12 @@ public class Downloader extends CordovaPlugin {
 
   private void removeDownloadReceiver(){
 	  try {
-		  webView.getContext().unregisterReceiver(downloadReceiver);
+		  appContext.unregisterReceiver(downloadReceiver); // ✅ CONTEXTO CORRETO
 		} 
 		catch (Exception e) {
 			LOG.e(LOG_TAG, "Error unregistering download receiver: " + e.getMessage(), e);
 		}
   }
-
-
 
   public void onRequestPermissionResult(int requestCode, String[] permissions, int[] grantResults) throws JSONException {
     for(int r:grantResults)
@@ -135,12 +132,17 @@ public class Downloader extends CordovaPlugin {
     public void onReceive(Context context, Intent intent) {
       
       long referenceId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+
+      // ✅ FILTRO CRÍTICO
+      if (referenceId != downloadId) {
+          return;
+      }
       
       DownloadManager.Query query = new DownloadManager.Query();
       query.setFilterById(referenceId);
       Cursor cursor = downloadManager.query(query);
       
-      if(cursor.moveToFirst()){
+      if(cursor != null && cursor.moveToFirst()){ // ✅ proteção
         String downloadedTo = cursor.getString(cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI));
         int status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS));
         int reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON));
@@ -151,11 +153,6 @@ public class Downloader extends CordovaPlugin {
             break;
           case DownloadManager.STATUS_FAILED:
             downloadReceiverCallbackContext.error(reason);
-            break;
-          case DownloadManager.STATUS_PAUSED:
-          case DownloadManager.STATUS_PENDING:
-          case DownloadManager.STATUS_RUNNING:
-          default:
             break;
         }
       }
@@ -178,9 +175,7 @@ public class Downloader extends CordovaPlugin {
     req.setMimeType(obj.optString("mimeType", null));
 
     if (obj.has("destinationInExternalFilesDir")) {
-      Context context = cordova.getActivity()
-                               .getApplication()
-                               .getApplicationContext();
+      Context context = appContext;
       
       JSONObject params = obj.getJSONObject("destinationInExternalFilesDir");
       req.setDestinationInExternalFilesDir(context, params.optString("dirType"), params.optString("subPath"));
